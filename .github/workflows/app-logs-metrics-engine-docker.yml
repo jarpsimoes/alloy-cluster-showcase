@@ -5,8 +5,6 @@ on:
     branches:
       - '**'
     paths:
-      - .githiub/workflows/app-logs-metrics-engine-docker.yml
-      - app-logs-metrics-engine/**
       - '!app-logs-metrics-engine/README.md'
       - '!app-logs-metrics-engine/README.*'
 
