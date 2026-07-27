@@ -6,9 +6,8 @@ on:
       - '**'
     paths:
       - app-logs-metrics-engine/**
-    paths-ignore:
-      - app-logs-metrics-engine/README.md
-      - app-logs-metrics-engine/README.*
+      - '!app-logs-metrics-engine/README.md'
+      - '!app-logs-metrics-engine/README.*'
 
 permissions:
   contents: read
