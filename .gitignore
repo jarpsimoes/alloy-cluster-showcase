@@ -1,0 +1,11 @@
+.venv
+config-aks-lab
+
+app-logs-metrics-engine/__pycache__/
+app-logs-metrics-engine/*.pyc
+app-logs-metrics-engine/*.pyo
+app-logs-metrics-engine/*.pyd
+app-logs-metrics-engine/.Python
+app-logs-metrics-engine/env/
+app-logs-metrics-engine/venv/
+app-logs-metrics-engine/.venv
