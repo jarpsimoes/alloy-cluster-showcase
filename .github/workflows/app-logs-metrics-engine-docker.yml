@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - '**'
-    paths:
-      - '!app-logs-metrics-engine/README.md'
-      - '!app-logs-metrics-engine/README.*'
 
 permissions:
   contents: read
