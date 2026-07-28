@@ -1,0 +1,309 @@
+alloy:
+  # ---- All backend credentials from a single Secret ----------------
+  # kubectl create secret generic alloy-daemonset-secrets -n monitoring \
+  #   --from-literal=prometheus_remote_write_url="https://<mimir>/api/v1/push" \
+  #   --from-literal=prometheus_username="<user>" \
+  #   --from-literal=prometheus_password="<pass>" \
+  #   --from-literal=loki_push_url="https://<loki>/loki/api/v1/push" \
+  #   --from-literal=loki_username="<user>" \
+  #   --from-literal=loki_password="<pass>" \
+  #   --from-literal=tempo_endpoint="<tempo-host>:443" \
+  #   --from-literal=tempo_username="<user>" \
+  #   --from-literal=tempo_password="<pass>"
+  extraEnv:
+    - name: PROMETHEUS_REMOTE_WRITE_URL
+      valueFrom:
+        secretKeyRef:
+          name: alloy-daemonset-secrets
+          key: prometheus_remote_write_url
+    - name: PROMETHEUS_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: alloy-daemonset-secrets
+          key: prometheus_username
+    - name: PROMETHEUS_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: alloy-daemonset-secrets
+          key: prometheus_password
+    - name: LOKI_PUSH_URL
+      valueFrom:
+        secretKeyRef:
+          name: alloy-daemonset-secrets
+          key: loki_push_url
+    - name: LOKI_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: alloy-daemonset-secrets
+          key: loki_username
+    - name: LOKI_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: alloy-daemonset-secrets
+          key: loki_password
+    - name: TEMPO_ENDPOINT
+      valueFrom:
+        secretKeyRef:
+          name: alloy-daemonset-secrets
+          key: tempo_endpoint
+    - name: TEMPO_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: alloy-daemonset-secrets
+          key: tempo_username
+    - name: TEMPO_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: alloy-daemonset-secrets
+          key: tempo_password
+
+  # Mount node-local log paths
+  mounts:
+    varlog: true
+
+  # ---- Open OTLP ports for trace ingestion -------------------------
+  extraPorts:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP
+
+  configMap:
+    content: |
+      // ================================================================
+      // Alloy - DaemonSet mode
+      //
+      // Signals:
+      //   Metrics  - prometheus.scrape of pods on this node only
+      //   Logs     - loki.source.file from /var/log/pods (node-local)
+      //   Traces   - otelcol OTLP receiver (apps push to node's DaemonSet pod)
+      // ================================================================
+
+      // ----------------------------------------------------------------
+      // METRICS  (node-local scraping - no cross-node duplication)
+      // ----------------------------------------------------------------
+
+      discovery.kubernetes "pods" {
+        role = "pod"
+      }
+
+      // Restrict to pods scheduled on THIS node only
+      discovery.relabel "node_pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        // Keep only pods on the current node
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          target_label  = "__host__"
+        }
+        rule {
+          source_labels = ["__host__"]
+          regex         = env("HOSTNAME")
+          action        = "keep"
+        }
+
+        // Opt-in: only annotated pods
+        rule {
+          source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_scrape"]
+          regex         = "true"
+          action        = "keep"
+        }
+
+        // Drop non-running pods
+        rule {
+          source_labels = ["__meta_kubernetes_pod_phase"]
+          regex         = "Pending|Succeeded|Failed|Unknown"
+          action        = "drop"
+        }
+
+        // Honour custom metrics path annotation
+        rule {
+          source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_path"]
+          regex         = "(.+)"
+          target_label  = "__metrics_path__"
+        }
+
+        // Honour custom port annotation
+        rule {
+          source_labels = ["__address__", "__meta_kubernetes_pod_annotation_prometheus_io_port"]
+          separator     = ";"
+          regex         = "([^:]+)(?::\\d+)?;(\\d+)"
+          replacement   = "$1:$2"
+          target_label  = "__address__"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          target_label  = "node"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app"]
+          target_label  = "app"
+        }
+      }
+
+      prometheus.scrape "node_pods" {
+        targets         = discovery.relabel.node_pods.output
+        forward_to      = [prometheus.remote_write.backend.receiver]
+        scrape_interval = "30s"
+        scrape_timeout  = "10s"
+      }
+
+      prometheus.remote_write "backend" {
+        endpoint {
+          url = env("PROMETHEUS_REMOTE_WRITE_URL")
+          basic_auth {
+            username = env("PROMETHEUS_USERNAME")
+            password = env("PROMETHEUS_PASSWORD")
+          }
+          queue_config {
+            max_samples_per_send = 5000
+            batch_send_deadline  = "5s"
+            min_backoff          = "30ms"
+            max_backoff          = "5s"
+          }
+        }
+      }
+
+      // ----------------------------------------------------------------
+      // LOGS  (file-based - reads /var/log/pods on this node)
+      // ----------------------------------------------------------------
+
+      // Pod log path format:
+      //   /var/log/pods/<namespace>_<pod-name>_<uid>/<container>/<n>.log
+      local.file_match "pod_logs" {
+        path_targets = [{"__path__" = "/var/log/pods/*/*/*.log"}]
+        sync_period  = "10s"
+      }
+
+      discovery.relabel "log_path_meta" {
+        targets = local.file_match.pod_logs.targets
+
+        rule {
+          source_labels = ["__path__"]
+          regex         = "/var/log/pods/([^_]+)_[^_]+_[^/]+/[^/]+/.*"
+          target_label  = "namespace"
+          replacement   = "$1"
+        }
+        rule {
+          source_labels = ["__path__"]
+          regex         = "/var/log/pods/[^_]+_([^_]+)_[^/]+/[^/]+/.*"
+          target_label  = "pod"
+          replacement   = "$1"
+        }
+        rule {
+          source_labels = ["__path__"]
+          regex         = "/var/log/pods/[^/]+/([^/]+)/.*"
+          target_label  = "container"
+          replacement   = "$1"
+        }
+      }
+
+      loki.source.file "pod_logs" {
+        targets    = discovery.relabel.log_path_meta.targets
+        forward_to = [loki.process.pod_logs.receiver]
+      }
+
+      loki.process "pod_logs" {
+        forward_to = [loki.write.backend.receiver]
+
+        // Drop health/live probe noise
+        stage.drop {
+          expression          = ".*(GET /health|GET /live|GET /metrics).*"
+          drop_counter_reason = "probe_noise"
+        }
+
+        stage.static_labels {
+          values = {
+            cluster = "alloy-cluster-lab",
+            mode    = "daemonset",
+          }
+        }
+      }
+
+      loki.write "backend" {
+        endpoint {
+          url = env("LOKI_PUSH_URL")
+          basic_auth {
+            username = env("LOKI_USERNAME")
+            password = env("LOKI_PASSWORD")
+          }
+        }
+        external_labels = { collector = "alloy-daemonset" }
+      }
+
+      // ----------------------------------------------------------------
+      // TRACES  (OTLP receiver - apps push to the pod on their own node)
+      // ----------------------------------------------------------------
+
+      otelcol.receiver.otlp "traces" {
+        grpc { endpoint = "0.0.0.0:4317" }
+        http { endpoint = "0.0.0.0:4318" }
+
+        output {
+          traces = [otelcol.processor.batch.traces.input]
+        }
+      }
+
+      otelcol.processor.batch "traces" {
+        output {
+          traces = [otelcol.exporter.otlp.tempo.input]
+        }
+      }
+
+      otelcol.auth.basic "tempo" {
+        username = env("TEMPO_USERNAME")
+        password = env("TEMPO_PASSWORD")
+      }
+
+      otelcol.exporter.otlp "tempo" {
+        client {
+          endpoint = env("TEMPO_ENDPOINT")
+          auth     = otelcol.auth.basic.tempo.handler
+          tls {
+            insecure = false
+          }
+        }
+      }
+
+controller:
+  type: daemonset
+
+  # Tolerate all taints to run on every node including control-plane
+  tolerations:
+    - operator: Exists
+
+  podSecurityContext:
+    runAsUser: 0
+
+  securityContext:
+    privileged: true
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      memory: 384Mi
+
+rbac:
+  create: true
+
+serviceAccount:
+  create: true

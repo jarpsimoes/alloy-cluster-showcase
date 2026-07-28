@@ -1,0 +1,37 @@
+image:
+  repository: ghcr.io/jarpsimoes/alloy-cluster-showcase/app-logs-metrics-engine
+  tag: latest
+  pullPolicy: IfNotPresent
+
+containerPort: 8080
+service:
+  type: ClusterIP
+  port: 8080
+
+resources: {}
+
+apps:
+  - name: test-accounts
+    version: "1.01"
+    env: dev
+    log: INFO
+    interval: "1.5"
+    namespace: test-app-1
+    replicas: 1
+    imageTag: "sha-0790f39771f73f5e3befa254736c429141c14878"
+  - name: test-trades
+    version: "1.7"
+    env: dev
+    log: WARN
+    interval: "1"
+    namespace: test-app-2
+    replicas: 2
+    imageTag: "sha-0790f39771f73f5e3befa254736c429141c14878"
+  - name: test-analytics
+    version: "0.9"
+    env: dev
+    log: TRACE
+    interval: "2"
+    namespace: test-app-3
+    replicas: 3
+    imageTag: "sha-0790f39771f73f5e3befa254736c429141c14878"

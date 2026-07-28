@@ -1,0 +1,71 @@
+repositories:
+  - name: grafana
+    url: https://grafana.github.io/helm-charts
+
+# Two deployment modes - deploy ONE at a time to compare behaviour:
+#
+#   helmfile -e statefulset apply    (or daemonset)
+#
+# Before deploying, create the namespace and the required secret.
+#
+# StatefulSet:
+#   kubectl create namespace monitoring
+#   kubectl create secret generic alloy-statefulset-secrets -n monitoring \
+#     --from-literal=prometheus_remote_write_url="https://<mimir>/api/v1/push" \
+#     --from-literal=prometheus_username="<user>" \
+#     --from-literal=prometheus_password="<pass>" \
+#     --from-literal=loki_push_url="https://<loki>/loki/api/v1/push" \
+#     --from-literal=loki_username="<user>" \
+#     --from-literal=loki_password="<pass>" \
+#     --from-literal=tempo_endpoint="<tempo-host>:443" \
+#     --from-literal=tempo_username="<user>" \
+#     --from-literal=tempo_password="<pass>"
+#
+# DaemonSet:
+#   kubectl create namespace monitoring
+#   kubectl create secret generic alloy-daemonset-secrets -n monitoring \
+#     --from-literal=prometheus_remote_write_url="https://<mimir>/api/v1/push" \
+#     --from-literal=prometheus_username="<user>" \
+#     --from-literal=prometheus_password="<pass>" \
+#     --from-literal=loki_push_url="https://<loki>/loki/api/v1/push" \
+#     --from-literal=loki_username="<user>" \
+#     --from-literal=loki_password="<pass>" \
+#     --from-literal=tempo_endpoint="<tempo-host>:443" \
+#     --from-literal=tempo_username="<user>" \
+#     --from-literal=tempo_password="<pass>"
+
+environments:
+  statefulset: {}
+  daemonset: {}
+
+---
+
+releases:
+
+  # ------------------------------------------------------------------
+  # StatefulSet: 3 clustered replicas, sharded metrics + logs (K8s API)
+  # + traces (OTLP). Persistent WAL per pod. No hostPath mounts needed.
+  # ------------------------------------------------------------------
+  - name: alloy-statefulset
+    namespace: monitoring
+    createNamespace: true
+    chart: grafana/alloy
+    # Pin to a known stable chart version - update as needed:
+    #   helm search repo grafana/alloy --versions
+    version: ">=0.9.0"
+    values:
+      - statefulset/values.yaml
+    installed: {{ eq .Environment.Name "statefulset" }}
+
+  # ------------------------------------------------------------------
+  # DaemonSet: one pod per node, node-local metrics + file-based logs
+  # + traces (OTLP). Apps push traces to the pod on their own node.
+  # ------------------------------------------------------------------
+  - name: alloy-daemonset
+    namespace: monitoring
+    createNamespace: true
+    chart: grafana/alloy
+    version: ">=0.9.0"
+    values:
+      - daemonset/values.yaml
+    installed: {{ eq .Environment.Name "daemonset" }}

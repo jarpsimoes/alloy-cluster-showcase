@@ -1,0 +1,343 @@
+alloy:
+  clustering:
+    enabled: true
+    name: alloy-statefulset
+
+  # WAL path backed by the PVC
+  storagePath: /var/lib/alloy
+
+  mounts:
+    extra:
+      - name: alloy-wal
+        mountPath: /var/lib/alloy
+
+  # ---- All backend credentials from a single Secret ----------------
+  # kubectl create secret generic alloy-statefulset-secrets -n monitoring \
+  #   --from-literal=prometheus_remote_write_url="https://<mimir>/api/v1/push" \
+  #   --from-literal=prometheus_username="<user>" \
+  #   --from-literal=prometheus_password="<pass>" \
+  #   --from-literal=loki_push_url="https://<loki>/loki/api/v1/push" \
+  #   --from-literal=loki_username="<user>" \
+  #   --from-literal=loki_password="<pass>" \
+  #   --from-literal=tempo_endpoint="<tempo-host>:443" \
+  #   --from-literal=tempo_username="<user>" \
+  #   --from-literal=tempo_password="<pass>"
+  extraEnv:
+    - name: PROMETHEUS_REMOTE_WRITE_URL
+      valueFrom:
+        secretKeyRef:
+          name: alloy-statefulset-secrets
+          key: prometheus_remote_write_url
+    - name: PROMETHEUS_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: alloy-statefulset-secrets
+          key: prometheus_username
+    - name: PROMETHEUS_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: alloy-statefulset-secrets
+          key: prometheus_password
+    - name: LOKI_PUSH_URL
+      valueFrom:
+        secretKeyRef:
+          name: alloy-statefulset-secrets
+          key: loki_push_url
+    - name: LOKI_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: alloy-statefulset-secrets
+          key: loki_username
+    - name: LOKI_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: alloy-statefulset-secrets
+          key: loki_password
+    - name: TEMPO_ENDPOINT
+      valueFrom:
+        secretKeyRef:
+          name: alloy-statefulset-secrets
+          key: tempo_endpoint
+    - name: TEMPO_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: alloy-statefulset-secrets
+          key: tempo_username
+    - name: TEMPO_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: alloy-statefulset-secrets
+          key: tempo_password
+
+  # ---- Open OTLP ports for trace ingestion -------------------------
+  extraPorts:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP
+
+  configMap:
+    content: |
+      // ================================================================
+      // Alloy - StatefulSet mode
+      //
+      // Signals:
+      //   Metrics  - sharded prometheus.scrape across all replicas
+      //   Logs     - loki.source.kubernetes (K8s API, no hostPath needed)
+      //   Traces   - otelcol OTLP receiver (apps push to this service)
+      // ================================================================
+
+      // ----------------------------------------------------------------
+      // METRICS
+      // ----------------------------------------------------------------
+
+      discovery.kubernetes "pods" {
+        role = "pod"
+      }
+
+      discovery.relabel "annotated_pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        // Opt-in: only pods annotated prometheus.io/scrape: "true"
+        rule {
+          source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_scrape"]
+          regex         = "true"
+          action        = "keep"
+        }
+
+        // Drop non-running pods
+        rule {
+          source_labels = ["__meta_kubernetes_pod_phase"]
+          regex         = "Pending|Succeeded|Failed|Unknown"
+          action        = "drop"
+        }
+
+        // Honour custom metrics path annotation
+        rule {
+          source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_path"]
+          regex         = "(.+)"
+          target_label  = "__metrics_path__"
+        }
+
+        // Honour custom port annotation
+        rule {
+          source_labels = ["__address__", "__meta_kubernetes_pod_annotation_prometheus_io_port"]
+          separator     = ";"
+          regex         = "([^:]+)(?::\\d+)?;(\\d+)"
+          replacement   = "$1:$2"
+          target_label  = "__address__"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          target_label  = "node"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app"]
+          target_label  = "app"
+        }
+      }
+
+      prometheus.scrape "pods" {
+        targets         = discovery.relabel.annotated_pods.output
+        forward_to      = [prometheus.remote_write.backend.receiver]
+        scrape_interval = "30s"
+        scrape_timeout  = "10s"
+
+        clustering {
+          enabled = true
+        }
+      }
+
+      prometheus.remote_write "backend" {
+        endpoint {
+          url = env("PROMETHEUS_REMOTE_WRITE_URL")
+          basic_auth {
+            username = env("PROMETHEUS_USERNAME")
+            password = env("PROMETHEUS_PASSWORD")
+          }
+          queue_config {
+            max_samples_per_send = 5000
+            batch_send_deadline  = "5s"
+            min_backoff          = "30ms"
+            max_backoff          = "5s"
+          }
+        }
+      }
+
+      // ----------------------------------------------------------------
+      // LOGS  (K8s API streaming - no /var/log/pods mount required)
+      // ----------------------------------------------------------------
+
+      discovery.kubernetes "log_pods" {
+        role = "pod"
+      }
+
+      discovery.relabel "log_pod_meta" {
+        targets = discovery.kubernetes.log_pods.targets
+
+        // Drop pods with logging disabled annotation
+        rule {
+          source_labels = ["__meta_kubernetes_pod_annotation_alloy_logs_disabled"]
+          regex         = "true"
+          action        = "drop"
+        }
+
+        // Drop non-running pods
+        rule {
+          source_labels = ["__meta_kubernetes_pod_phase"]
+          regex         = "Pending|Succeeded|Failed|Unknown"
+          action        = "drop"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          target_label  = "node"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app"]
+          target_label  = "app"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "app_kubernetes_io_name"
+        }
+      }
+
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.log_pod_meta.output
+        forward_to = [loki.process.pod_logs.receiver]
+
+        clustering {
+          enabled = true
+        }
+      }
+
+      loki.process "pod_logs" {
+        forward_to = [loki.write.backend.receiver]
+
+        // Drop health/live probe noise
+        stage.drop {
+          expression          = ".*(GET /health|GET /live|GET /metrics).*"
+          drop_counter_reason = "probe_noise"
+        }
+
+        stage.static_labels {
+          values = {
+            cluster  = "alloy-cluster-lab",
+            mode     = "statefulset",
+          }
+        }
+      }
+
+      loki.write "backend" {
+        endpoint {
+          url = env("LOKI_PUSH_URL")
+          basic_auth {
+            username = env("LOKI_USERNAME")
+            password = env("LOKI_PASSWORD")
+          }
+        }
+        external_labels = { collector = "alloy-statefulset" }
+      }
+
+      // ----------------------------------------------------------------
+      // TRACES  (OTLP receiver - apps push traces to alloy service)
+      // ----------------------------------------------------------------
+
+      otelcol.receiver.otlp "traces" {
+        grpc { endpoint = "0.0.0.0:4317" }
+        http { endpoint = "0.0.0.0:4318" }
+
+        output {
+          traces = [otelcol.processor.batch.traces.input]
+        }
+      }
+
+      otelcol.processor.batch "traces" {
+        output {
+          traces = [otelcol.exporter.otlp.tempo.input]
+        }
+      }
+
+      otelcol.auth.basic "tempo" {
+        username = env("TEMPO_USERNAME")
+        password = env("TEMPO_PASSWORD")
+      }
+
+      otelcol.exporter.otlp "tempo" {
+        client {
+          endpoint = env("TEMPO_ENDPOINT")
+          auth     = otelcol.auth.basic.tempo.handler
+          tls {
+            insecure = false
+          }
+        }
+      }
+
+controller:
+  type: statefulset
+  replicas: 3
+  parallelRollout: true
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: alloy
+
+  volumeClaimTemplates:
+    - metadata:
+        name: alloy-wal
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+
+  resources:
+    requests:
+      cpu: 150m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
