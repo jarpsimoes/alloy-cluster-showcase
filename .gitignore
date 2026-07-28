@@ -10,3 +10,5 @@ app-logs-metrics-engine/env/
 app-logs-metrics-engine/venv/
 app-logs-metrics-engine/.venv
 app-logs-metrics-engine/.env
+
+grafana-labs-env.sh
