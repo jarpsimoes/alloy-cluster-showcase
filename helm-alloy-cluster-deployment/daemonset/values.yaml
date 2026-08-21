@@ -216,7 +216,7 @@ alloy:
       }
 
       loki.source.file "pod_logs" {
-        targets    = discovery.relabel.log_path_meta.targets
+        targets    = discovery.relabel.log_path_meta.output
         forward_to = [loki.process.pod_logs.receiver]
       }
 
